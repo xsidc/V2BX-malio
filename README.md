@@ -3,10 +3,16 @@
 这是专门为 SSPanel-UIM 面板定制的 V2bX 版本，支持完整的 VLESS Reality 节点对接 和 流媒体与Ai解锁检测
 
 ## V2bX一键安装脚本
-```wget -N https://raw.githubusercontent.com/xsidc/V2BX-malio/main/install.sh && bash install.sh```
+
+```
+wget -N https://raw.githubusercontent.com/xsidc/V2BX-malio/main/install.sh && bash install.sh
+```
 
 ## 流媒体与Ai解锁检测一键安装脚本
-```wget https://raw.githubusercontent.com/q42602736/SSPanel-Metron/master/media_unlock.sh -O media_unlock.sh && chmod +x media_unlock.sh && ./media_unlock.sh```
+
+```
+wget https://raw.githubusercontent.com/q42602736/SSPanel-Metron/master/media_unlock.sh -O media_unlock.sh && chmod +x media_unlock.sh && ./media_unlock.sh
+```
 
 ## 🚀 特性
 
