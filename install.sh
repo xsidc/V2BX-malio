@@ -1,20 +1,112 @@
 #!/bin/bash
+# ==============================================
+# 自定义自动化开关配置区
+# ==============================================
+AUTO_SET_DNS=true
+DNS_PRIMARY="8.8.8.8"
+DNS_SECONDARY="1.1.1.1"
+
+AUTO_BBR_FQ=true
+
+# 首次安装全部默认Yes，关闭则不执行对应动作
+AUTO_GEN_CONFIG=true
+AUTO_AUDIT_CONFIG=true
+AUTO_SET_API_URL=true
+
+# 请修改为你的机场面板地址与API密钥
+PANEL_URL="https://xxx.com"
+PANEL_API_KEY="your_api_key_here"
+# ==============================================
 
 red='\033[0;31m'
 green='\033[0;32m'
 yellow='\033[0;33m'
 plain='\033[0m'
-
-# 是否在安装时自动修改 DNS（true=开启，false=关闭）
-AUTO_SET_DNS=true
-DNS_PRIMARY="8.8.8.8"
-DNS_SECONDARY="1.1.1.1"
-
 cur_dir=$(pwd)
+
+# 设置DNS函数
+set_dns(){
+    if [ "$AUTO_SET_DNS" != "true" ];then
+        echo -e "${green}DNS自动配置开关关闭，跳过${plain}"
+        return 0
+    fi
+    echo -e "${green}【自动设置DNS】主DNS:${DNS_PRIMARY} 备DNS:${DNS_SECONDARY}${plain}"
+    [ ! -f /etc/resolv.conf.bak ] && cp -a /etc/resolv.conf /etc/resolv.conf.bak
+
+    if [ -f /etc/systemd/resolved.conf ];then
+        sed -i "s/^DNS=.*/DNS=${DNS_PRIMARY} ${DNS_SECONDARY}/" /etc/systemd/resolved.conf
+        sed -i "s/^#DNS=.*/DNS=${DNS_PRIMARY} ${DNS_SECONDARY}/" /etc/systemd/resolved.conf
+        sed -i "s/^FallbackDNS=.*/FallbackDNS=${DNS_PRIMARY} ${DNS_SECONDARY}/" /etc/systemd/resolved.conf
+        sed -i "s/^#FallbackDNS=.*/FallbackDNS=${DNS_PRIMARY} ${DNS_SECONDARY}/" /etc/systemd/resolved.conf
+        systemctl restart systemd-resolved 2>/dev/null
+    fi
+
+    if [ -d /etc/NetworkManager/conf.d ];then
+        cat > /etc/NetworkManager/conf.d/99-static-dns.conf <<EOF
+[main]
+dns=none
+EOF
+        systemctl restart NetworkManager 2>/dev/null
+    fi
+
+    rm -f /etc/resolv.conf
+    cat > /etc/resolv.conf <<EOF
+nameserver ${DNS_PRIMARY}
+nameserver ${DNS_SECONDARY}
+EOF
+}
+
+# BBR+FQ + 系统网络自适应优化
+enable_bbr_fq(){
+    if [ "$AUTO_BBR_FQ" != "true" ];then
+        echo -e "${green}BBR+FQ加速开关关闭，跳过${plain}"
+        return 0
+    fi
+    echo -e "${green}【网络优化】开启BBR+FQ、系统网络自适应调优${plain}"
+
+    KV=$(uname -r | awk -F. '{print $1"."$2}')
+    MAJ=${KV%.[0-9]*}
+    MIN=${KV#*.}
+    if (( MAJ < 4 || (MAJ == 4 && MIN < 9) ));then
+        echo -e "${red}内核版本 <4.9，不支持BBR，跳过BBR+FQ${plain}"
+        return 0
+    fi
+
+    modprobe tcp_bbr 2>/dev/null
+    echo "tcp_bbr" > /etc/modules-load.d/bbr.conf
+
+    cat > /etc/sysctl.d/99-bbr-adaptive.conf <<EOF
+# BBR + FQ
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
+
+# TCP自适应缓冲
+net.ipv4.tcp_moderate_rcvbuf = 1
+net.core.rmem_max = 33554432
+net.core.wmem_max = 33554432
+net.ipv4.tcp_rmem = 4096 1048576 33554432
+net.ipv4.tcp_wmem = 4096 1048576 33554432
+
+# 连接队列优化
+net.core.somaxconn = 65535
+net.core.netdev_max_backlog = 250000
+net.ipv4.tcp_max_syn_backlog = 8192
+
+# TIME_WAIT复用
+net.ipv4.tcp_tw_reuse = 1
+net.ipv4.tcp_fin_timeout = 30
+
+net.ipv4.tcp_syncookies = 1
+net.ipv4.ip_forward = 1
+EOF
+    sysctl --system 2>/dev/null
+
+    echo -e "${green}BBR状态: $(sysctl -n net.ipv4.tcp_congestion_control)${plain}"
+    echo -e "${green}FQ队列: $(sysctl -n net.core.default_qdisc)${plain}"
+}
 
 # check root
 [[ $EUID -ne 0 ]] && echo -e "${red}错误：${plain} 必须使用root用户运行此脚本！\n" && exit 1
-
 # check os
 if [[ -f /etc/redhat-release ]]; then
     release="centos"
@@ -37,9 +129,7 @@ elif cat /proc/version | grep -Eqi "arch"; then
 else
     echo -e "${red}未检测到系统版本，请联系脚本作者！${plain}\n" && exit 1
 fi
-
 arch=$(uname -m)
-
 if [[ $arch == "x86_64" || $arch == "x64" || $arch == "amd64" ]]; then
     arch="64"
 elif [[ $arch == "aarch64" || $arch == "arm64" ]]; then
@@ -50,14 +140,11 @@ else
     arch="64"
     echo -e "${red}检测架构失败，使用默认架构: ${arch}${plain}"
 fi
-
 echo "架构: ${arch}"
-
 if [ "$(getconf WORD_BIT)" != '32' ] && [ "$(getconf LONG_BIT)" != '64' ] ; then
     echo "本软件不支持 32 位系统(x86)，请使用 64 位系统(x86_64)，如果检测有误，请联系作者"
     exit 2
 fi
-
 # os version
 if [[ -f /etc/os-release ]]; then
     os_version=$(awk -F'[= ."]' '/VERSION_ID/{print $3}' /etc/os-release)
@@ -65,7 +152,6 @@ fi
 if [[ -z "$os_version" && -f /etc/lsb-release ]]; then
     os_version=$(awk -F'[= ."]+' '/DISTRIB_RELEASE/{print $2}' /etc/lsb-release)
 fi
-
 if [[ x"${release}" == x"centos" ]]; then
     if [[ ${os_version} -le 6 ]]; then
         echo -e "${red}请使用 CentOS 7 或更高版本的系统！${plain}\n" && exit 1
@@ -82,7 +168,6 @@ elif [[ x"${release}" == x"debian" ]]; then
         echo -e "${red}请使用 Debian 8 或更高版本的系统！${plain}\n" && exit 1
     fi
 fi
-
 install_base() {
     if [[ x"${release}" == x"centos" ]]; then
         yum install epel-release wget curl unzip tar crontabs socat ca-certificates -y
@@ -105,51 +190,6 @@ install_base() {
         pacman -S --noconfirm --needed ca-certificates wget
     fi
 }
-
-# 自动修改系统 DNS 为 DNS_PRIMARY / DNS_SECONDARY
-set_dns() {
-    [[ x"${AUTO_SET_DNS}" != x"true" ]] && return 0
-
-    echo -e "${green}开始设置 DNS 为 ${DNS_PRIMARY} / ${DNS_SECONDARY}${plain}"
-
-    # 1. 首次备份原有 resolv.conf
-    if [[ ! -f /etc/resolv.conf.bak ]]; then
-        cp -a /etc/resolv.conf /etc/resolv.conf.bak 2>/dev/null || true
-        echo -e "原 DNS 配置已备份至 /etc/resolv.conf.bak"
-    fi
-
-    # 2. 配置 systemd-resolved（Debian/Ubuntu/Arch/CentOS8+ 等使用 systemd 的系统）
-    if [[ -f /etc/systemd/resolved.conf ]] && command -v systemctl >/dev/null 2>&1; then
-        sed -i -E "/^[[:space:]]*DNS=/d" /etc/systemd/resolved.conf
-        sed -i -E "/^[[:space:]]*FallbackDNS=/d" /etc/systemd/resolved.conf
-        echo "DNS=${DNS_PRIMARY} ${DNS_SECONDARY}" >> /etc/systemd/resolved.conf
-        echo "FallbackDNS=${DNS_PRIMARY} ${DNS_SECONDARY}" >> /etc/systemd/resolved.conf
-        systemctl restart systemd-resolved 2>/dev/null || true
-    fi
-
-    # 3. 防止 NetworkManager 重启后覆盖 resolv.conf（将 DNS 交由文件静态管理）
-    if command -v nmcli >/dev/null 2>&1 || [[ -d /etc/NetworkManager/conf.d ]]; then
-        mkdir -p /etc/NetworkManager/conf.d
-        cat > /etc/NetworkManager/conf.d/99-resolv-dns.conf <<EOF
-[main]
-dns=none
-EOF
-        systemctl restart NetworkManager 2>/dev/null || true
-    fi
-
-    # 4. 写入静态 /etc/resolv.conf（若是指向 stub 的软链接，先删除避免被覆盖）
-    if [[ -L /etc/resolv.conf ]]; then
-        rm -f /etc/resolv.conf
-    fi
-    cat > /etc/resolv.conf <<EOF
-nameserver ${DNS_PRIMARY}
-nameserver ${DNS_SECONDARY}
-EOF
-    chmod 644 /etc/resolv.conf
-
-    echo -e "${green}DNS 设置完成：${DNS_PRIMARY}、${DNS_SECONDARY}${plain}"
-}
-
 # 0: running, 1: not running, 2: not installed
 check_status() {
     if [[ ! -f /usr/local/V2bX/V2bX ]]; then
@@ -171,15 +211,12 @@ check_status() {
         fi
     fi
 }
-
 install_V2bX() {
     if [[ -e /usr/local/V2bX/ ]]; then
         rm -rf /usr/local/V2bX/
     fi
-
     mkdir /usr/local/V2bX/ -p
     cd /usr/local/V2bX/
-
     if  [ $# == 0 ] ;then
         # 使用q42602736的V2BX-malio仓库
         last_version=$(curl -Ls "https://api.github.com/repos/q42602736/V2BX-malio/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
@@ -203,7 +240,6 @@ install_V2bX() {
             exit 1
         fi
     fi
-
     unzip V2bX-linux.zip
     rm V2bX-linux.zip -f
     chmod +x V2bX
@@ -214,17 +250,13 @@ install_V2bX() {
         rm /etc/init.d/V2bX -f
         cat <<EOF > /etc/init.d/V2bX
 #!/sbin/openrc-run
-
 name="V2bX"
 description="V2bX"
-
 command="/usr/local/V2bX/V2bX"
 command_args="server"
 command_user="root"
-
 pidfile="/run/V2bX.pid"
 command_background="yes"
-
 depend() {
         need net
 }
@@ -241,7 +273,6 @@ EOF
         systemctl enable V2bX
         echo -e "${green}V2bX ${last_version}${plain} 安装完成，已设置开机自启"
     fi
-
     if [[ ! -f /etc/V2bX/config.json ]]; then
         cp config.json /etc/V2bX/
         echo -e ""
@@ -263,7 +294,6 @@ EOF
         fi
         first_install=false
     fi
-
     if [[ ! -f /etc/V2bX/dns.json ]]; then
         cp dns.json /etc/V2bX/
     fi
@@ -303,9 +333,9 @@ EOF
     echo "V2bX uninstall    - 卸载 V2bX"
     echo "V2bX version      - 查看 V2bX 版本"
     echo "------------------------------------------"
-    # 首次安装询问是否生成配置文件
+    # 首次安装询问是否生成配置文件 —— 改为静默自动yes
     if [[ $first_install == true ]]; then
-        read -rp "检测到你为第一次安装V2bX,是否自动直接生成配置文件？(y/n): " if_generate
+        if_generate="y"
         if [[ $if_generate == [Yy] ]]; then
             curl -o ./initconfig.sh -Ls https://raw.githubusercontent.com/wyx2685/V2bX-script/master/initconfig.sh
             source initconfig.sh
@@ -318,4 +348,5 @@ EOF
 echo -e "${green}开始安装${plain}"
 install_base
 set_dns
+enable_bbr_fq
 install_V2bX $1
