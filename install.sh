@@ -7,6 +7,7 @@ DNS_PRIMARY="8.8.8.8"
 DNS_SECONDARY="1.1.1.1"
 
 AUTO_BBR_FQ=true
+AUTO_FORWARD_TUNING=true          # 代理/转发组网优化开关
 
 # 首次安装全部默认Yes，关闭则不执行对应动作
 AUTO_GEN_CONFIG=true
@@ -56,53 +57,78 @@ nameserver ${DNS_SECONDARY}
 EOF
 }
 
-# BBR+FQ + 系统网络自适应优化
+# BBR+FQ + 系统网络自适应优化 + 代理转发组网调优
 enable_bbr_fq(){
-    if [ "$AUTO_BBR_FQ" != "true" ];then
-        echo -e "${green}BBR+FQ加速开关关闭，跳过${plain}"
+    if [ "$AUTO_BBR_FQ" != "true" ] && [ "$AUTO_FORWARD_TUNING" != "true" ];then
+        echo -e "${green}BBR与转发优化开关全部关闭，跳过网络调优${plain}"
         return 0
     fi
-    echo -e "${green}【网络优化】开启BBR+FQ、系统网络自适应调优${plain}"
+    echo -e "${green}【网络优化】BBR+FQ、系统自适应、代理转发组网调优${plain}"
 
     KV=$(uname -r | awk -F. '{print $1"."$2}')
     MAJ=${KV%.[0-9]*}
     MIN=${KV#*.}
-    if (( MAJ < 4 || (MAJ == 4 && MIN < 9) ));then
-        echo -e "${red}内核版本 <4.9，不支持BBR，跳过BBR+FQ${plain}"
-        return 0
-    fi
 
+    # 加载内核模块
     modprobe tcp_bbr 2>/dev/null
+    modprobe nf_conntrack 2>/dev/null
     echo "tcp_bbr" > /etc/modules-load.d/bbr.conf
 
     cat > /etc/sysctl.d/99-bbr-adaptive.conf <<EOF
-# BBR + FQ
+# ========= BBR + FQ 拥塞控制 =========
 net.core.default_qdisc = fq
 net.ipv4.tcp_congestion_control = bbr
 
-# TCP自适应缓冲
+# ========= TCP自适应缓冲 =========
 net.ipv4.tcp_moderate_rcvbuf = 1
 net.core.rmem_max = 33554432
 net.core.wmem_max = 33554432
 net.ipv4.tcp_rmem = 4096 1048576 33554432
 net.ipv4.tcp_wmem = 4096 1048576 33554432
 
-# 连接队列优化
+# ========= 连接队列优化 =========
 net.core.somaxconn = 65535
 net.core.netdev_max_backlog = 250000
 net.ipv4.tcp_max_syn_backlog = 8192
 
-# TIME_WAIT复用
+# ========= TIME_WAIT端口复用 =========
 net.ipv4.tcp_tw_reuse = 1
 net.ipv4.tcp_fin_timeout = 30
 
 net.ipv4.tcp_syncookies = 1
+
+# ========= 【代理转发组网】IP转发开关 =========
 net.ipv4.ip_forward = 1
+net.ipv6.conf.all.forwarding = 1
+
+# 非对称路由宽松rp_filter，中转服务器防丢包
+net.ipv4.conf.all.rp_filter = 2
+net.ipv4.conf.default.rp_filter = 2
+
+# 扩大本地出站端口范围，避免高并发端口耗尽
+net.ipv4.ip_local_port_range = 1024 65535
+
+# ========= conntrack连接追踪优化（转发/NAT必备） =========
+net.netfilter.nf_conntrack_max = 1048576
+net.netfilter.nf_conntrack_tcp_timeout_established = 7200
+net.netfilter.nf_conntrack_tcp_timeout_time_wait = 30
+net.netfilter.nf_conntrack_tcp_timeout_close_wait = 60
+net.netfilter.nf_conntrack_tcp_timeout_fin_wait = 120
 EOF
+
+    # 文件句柄全局调高
+    cat > /etc/security/limits.d/99-v2bx-nofile.conf <<EOF
+* soft nofile 1048576
+* hard nofile 1048576
+root soft nofile 1048576
+root hard nofile 1048576
+EOF
+
     sysctl --system 2>/dev/null
 
     echo -e "${green}BBR状态: $(sysctl -n net.ipv4.tcp_congestion_control)${plain}"
     echo -e "${green}FQ队列: $(sysctl -n net.core.default_qdisc)${plain}"
+    echo -e "${green}IPv4转发: $(sysctl -n net.ipv4.ip_forward)${plain}"
 }
 
 # check root
