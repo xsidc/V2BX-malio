@@ -5,6 +5,11 @@ green='\033[0;32m'
 yellow='\033[0;33m'
 plain='\033[0m'
 
+# 是否在安装时自动修改 DNS（true=开启，false=关闭）
+AUTO_SET_DNS=true
+DNS_PRIMARY="8.8.8.8"
+DNS_SECONDARY="1.1.1.1"
+
 cur_dir=$(pwd)
 
 # check root
@@ -99,6 +104,50 @@ install_base() {
         pacman -S --noconfirm --needed wget curl unzip tar cron socat
         pacman -S --noconfirm --needed ca-certificates wget
     fi
+}
+
+# 自动修改系统 DNS 为 DNS_PRIMARY / DNS_SECONDARY
+set_dns() {
+    [[ x"${AUTO_SET_DNS}" != x"true" ]] && return 0
+
+    echo -e "${green}开始设置 DNS 为 ${DNS_PRIMARY} / ${DNS_SECONDARY}${plain}"
+
+    # 1. 首次备份原有 resolv.conf
+    if [[ ! -f /etc/resolv.conf.bak ]]; then
+        cp -a /etc/resolv.conf /etc/resolv.conf.bak 2>/dev/null || true
+        echo -e "原 DNS 配置已备份至 /etc/resolv.conf.bak"
+    fi
+
+    # 2. 配置 systemd-resolved（Debian/Ubuntu/Arch/CentOS8+ 等使用 systemd 的系统）
+    if [[ -f /etc/systemd/resolved.conf ]] && command -v systemctl >/dev/null 2>&1; then
+        sed -i -E "/^[[:space:]]*DNS=/d" /etc/systemd/resolved.conf
+        sed -i -E "/^[[:space:]]*FallbackDNS=/d" /etc/systemd/resolved.conf
+        echo "DNS=${DNS_PRIMARY} ${DNS_SECONDARY}" >> /etc/systemd/resolved.conf
+        echo "FallbackDNS=${DNS_PRIMARY} ${DNS_SECONDARY}" >> /etc/systemd/resolved.conf
+        systemctl restart systemd-resolved 2>/dev/null || true
+    fi
+
+    # 3. 防止 NetworkManager 重启后覆盖 resolv.conf（将 DNS 交由文件静态管理）
+    if command -v nmcli >/dev/null 2>&1 || [[ -d /etc/NetworkManager/conf.d ]]; then
+        mkdir -p /etc/NetworkManager/conf.d
+        cat > /etc/NetworkManager/conf.d/99-resolv-dns.conf <<EOF
+[main]
+dns=none
+EOF
+        systemctl restart NetworkManager 2>/dev/null || true
+    fi
+
+    # 4. 写入静态 /etc/resolv.conf（若是指向 stub 的软链接，先删除避免被覆盖）
+    if [[ -L /etc/resolv.conf ]]; then
+        rm -f /etc/resolv.conf
+    fi
+    cat > /etc/resolv.conf <<EOF
+nameserver ${DNS_PRIMARY}
+nameserver ${DNS_SECONDARY}
+EOF
+    chmod 644 /etc/resolv.conf
+
+    echo -e "${green}DNS 设置完成：${DNS_PRIMARY}、${DNS_SECONDARY}${plain}"
 }
 
 # 0: running, 1: not running, 2: not installed
@@ -268,4 +317,5 @@ EOF
 
 echo -e "${green}开始安装${plain}"
 install_base
+set_dns
 install_V2bX $1
