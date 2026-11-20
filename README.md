@@ -1,5 +1,3 @@
-# V2bX SSPanel 对接版本
-
 这是专门为 SSPanel-UIM 面板定制的 V2bX 版本，支持完整的 VLESS Reality 节点对接 和 流媒体与Ai解锁检测
 
 ## V2bX一键安装脚本
